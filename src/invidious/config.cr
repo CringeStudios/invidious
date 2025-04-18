@@ -35,7 +35,7 @@ struct ConfigPreferences
   property max_results : Int32 = 40
   property notifications_only : Bool = false
   property player_style : String = "invidious"
-  property quality : String = "hd720"
+  property quality : String = "dash"
   property quality_dash : String = "auto"
   property default_home : String? = "Popular"
   property feed_menu : Array(String) = ["Popular", "Trending", "Subscriptions", "Playlists"]
@@ -267,10 +267,14 @@ class Config
       elsif config.invidious_companion_key == "CHANGE_ME!!"
         puts "Config: The value of 'invidious_companion_key' needs to be changed!!"
         exit(1)
-      elsif config.invidious_companion_key.size < 16
-        puts "Config: The value of 'invidious_companion_key' needs to be a size of 16 or more."
+      elsif config.invidious_companion_key.size != 16
+        puts "Config: The value of 'invidious_companion_key' needs to be a size of 16 characters."
         exit(1)
       end
+    elsif config.signature_server
+      puts("WARNING: inv-sig-helper is deprecated. Please switch to Invidious companion: https://docs.invidious.io/companion-installation/")
+    else
+      puts("WARNING: Invidious companion is required to view and playback videos. For more information see https://docs.invidious.io/companion-installation/")
     end
 
     # HMAC_key is mandatory
