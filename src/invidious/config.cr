@@ -52,6 +52,8 @@ struct ConfigPreferences
   property vr_mode : Bool = true
   property show_nick : Bool = true
   property save_player_pos : Bool = false
+  @[YAML::Field(ignore: true)]
+  property default_playlist : String? = nil
 
   def to_tuple
     {% begin %}
@@ -283,9 +285,9 @@ class Config
         end
       end
     elsif config.signature_server
-      puts("WARNING: inv-sig-helper is deprecated. Please switch to Invidious companion: https://docs.invidious.io/companion-installation/")
+      puts("WARNING: inv-sig-helper is deprecated. Please switch to Invidious companion: https://docs.invidious.io/installation/")
     else
-      puts("WARNING: Invidious companion is required to view and playback videos. For more information see https://docs.invidious.io/companion-installation/")
+      puts("WARNING: Invidious companion is required to view and playback videos. For more information see https://docs.invidious.io/installation/")
     end
 
     # HMAC_key is mandatory
