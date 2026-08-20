@@ -193,8 +193,9 @@ struct Video
     }
   end
 
-  def invidious_companion : Hash(String, JSON::Any)?
-    info["invidiousCompanion"]?.try &.as_h || {} of String => JSON::Any
+  # Returns true if comments are enabled on the video
+  def comments?
+    return info["commentsEnabled"].as_bool
   end
 
   # Macros defining getters/setters for various types of data
