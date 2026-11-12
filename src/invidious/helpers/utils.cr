@@ -1,23 +1,18 @@
 PUBSUB_URL = URI.parse("https://pubsubhubbub.appspot.com")
 
-# See http://www.evanmiller.org/how-not-to-sort-by-average-rating.html
-def ci_lower_bound(pos, n)
-  if n == 0
-    return 0.0
+# 2026-11-01: Add support for locales!
+def video_length_abbreviated(length)
+  if length.days > 0
+    length_abbreviated = "#{length.days} d #{length.hours} hr #{length.minutes} min"
+  elsif length.hours > 0
+    length_abbreviated = "#{length.hours} h #{length.minutes} min"
+  elsif length.minutes > 0
+    length_abbreviated = "#{length.minutes} min"
+  else
+    length_abbreviated = "#{length.seconds} seconds"
   end
 
-  # z value here represents a confidence level of 0.95
-  z = 1.96
-  phat = 1.0*pos/n
-
-  return (phat + z*z/(2*n) - z * Math.sqrt((phat*(1 - phat) + z*z/(4*n))/n))/(1 + z*z/n)
-end
-
-def elapsed_text(elapsed)
-  millis = elapsed.total_milliseconds
-  return "#{millis.round(2)}ms" if millis >= 1
-
-  "#{(millis * 1000).round(2)}µs"
+  length_abbreviated
 end
 
 def decode_length_seconds(string)
@@ -102,7 +97,7 @@ def decode_date(string : String)
   # Try to parse as format Jul 10, 2000
   begin
     return Time.parse(string, "%b %-d, %Y", Time::Location.local)
-  rescue ex
+  rescue
   end
 
   case string
@@ -110,7 +105,6 @@ def decode_date(string : String)
     return Time.utc
   when "yesterday"
     return Time.utc - 1.day
-  else nil # Continue
   end
 
   # String matches format "20 hours ago", "4 months ago", "20s ago", "15min ago"...
@@ -177,7 +171,7 @@ def short_text_to_number(short_text : String) : Int64
   end
 
   return number.to_i64
-rescue ex
+rescue
   return 0_i64
 end
 
@@ -403,4 +397,11 @@ def invidious_companion_encrypt(data)
   timestamp = Time.utc.to_unix
   encrypted_data = encrypt_ecb_without_salt("#{timestamp}|#{data}", CONFIG.invidious_companion_key)
   return Base64.urlsafe_encode(encrypted_data)
+end
+
+def validate_video_id(id : String) : Bool
+  # This is the video ID regex. May be need to be changed
+  # if Youtube ever decides to add more characters to their
+  # video IDs.
+  /\A[a-zA-Z0-9_-]{11}\z/.matches?(id)
 end

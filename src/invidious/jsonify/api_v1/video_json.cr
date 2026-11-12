@@ -64,6 +64,7 @@ module Invidious::JSONify::APIv1
       json.field "liveNow", video.live_now
       json.field "isPostLiveDvr", video.post_live_dvr
       json.field "isUpcoming", video.upcoming?
+      json.field "aiMade", video.ai_made
 
       if video.premiere_timestamp
         json.field "premiereTimestamp", video.premiere_timestamp.try &.to_unix
@@ -138,7 +139,7 @@ module Invidious::JSONify::APIv1
 
               if fmt_info = Invidious::Videos::Formats.itag_to_metadata?(fmt["itag"])
                 json.field "container", fmt_info["ext"]
-                json.field "encoding", fmt_info["vcodec"]? || fmt_info["acodec"]
+                json.field("encoding", fmt_info["vcodec"]? || fmt_info["acodec"])
               end
 
               # Livestream chunk infos
@@ -198,8 +199,8 @@ module Invidious::JSONify::APIv1
               end
 
               if fmt_info = Invidious::Videos::Formats.itag_to_metadata?(fmt["itag"])
-                json.field "container", fmt_info["ext"]
-                json.field "encoding", fmt_info["vcodec"]? || fmt_info["acodec"]
+                json.field("container", fmt_info["ext"])
+                json.field("encoding", fmt_info["vcodec"]? || fmt_info["acodec"])
               end
             end
           end

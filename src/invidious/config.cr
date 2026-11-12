@@ -59,7 +59,7 @@ struct ConfigPreferences
   def to_tuple
     {% begin %}
       {
-        {{(@type.instance_vars.map { |var| "#{var.name}: #{var.name}".id }).splat}}
+        {{ (@type.instance_vars.map { |var| "#{var.name}: #{var.name}".id }).splat }}
       }
     {% end %}
   end
@@ -147,6 +147,8 @@ class Config
   property cache_annotations : Bool = false
   # Optional banner to be displayed along top of page for announcements, etc.
   property banner : String? = nil
+  # Optional footer banner to be displayed along the bottom of the page. Can be used for maintainer contact info, etc.
+  property footer : String? = nil
   # Enables 'Strict-Transport-Security'. Ensure that `domain` and all subdomains are served securely
   property hsts : Bool? = true
   # Disable proxying server-wide: options: 'dash', 'livestreams', 'downloads', 'local'
@@ -226,7 +228,16 @@ class Config
     env_config_yaml = "INVIDIOUS_CONFIG"
 
     config_file = ENV.has_key?(env_config_file) ? ENV.fetch(env_config_file) : "config/config.yml"
-    config_yaml = ENV.has_key?(env_config_yaml) ? ENV.fetch(env_config_yaml) : File.read(config_file)
+    config_yaml = if ENV.has_key?(env_config_yaml)
+                    ENV.fetch(env_config_yaml)
+                  else
+                    begin
+                      File.read(config_file)
+                    rescue ex
+                      puts "Config: Failed to load configuration file: #{ex.message}"
+                      exit(1)
+                    end
+                  end
 
     config = Config.from_yaml(config_yaml)
 
@@ -237,14 +248,14 @@ class Config
     {% for ivar in Config.instance_vars %}
         {% env_id = "INVIDIOUS_#{ivar.id.upcase}" %}
 
-        if ENV.has_key?({{env_id}})
-            env_value = ENV.fetch({{env_id}})
+        if ENV.has_key?({{ env_id }})
+            env_value = ENV.fetch({{ env_id }})
             success = false
 
             # Use YAML converter if specified
             {% ann = ivar.annotation(::YAML::Field) %}
             {% if ann && ann[:converter] %}
-                config.{{ivar.id}} = {{ann[:converter]}}.from_yaml(YAML::ParseContext.new, YAML::Nodes.parse(ENV.fetch({{env_id}})).nodes[0])
+                config.{{ ivar.id }} = {{ ann[:converter] }}.from_yaml(YAML::ParseContext.new, YAML::Nodes.parse(ENV.fetch({{ env_id }})).nodes[0])
                 success = true
 
             # Use regular YAML parser otherwise
@@ -252,10 +263,10 @@ class Config
                 {% ivar_types = ivar.type.union? ? ivar.type.union_types : [ivar.type] %}
                 # Sort types to avoid parsing nulls and numbers as strings
                 {% ivar_types = ivar_types.sort_by { |ivar_type| ivar_type == Nil ? 0 : ivar_type == Int32 ? 1 : 2 } %}
-                {{ivar_types}}.each do |ivar_type|
+                {{ ivar_types }}.each do |ivar_type|
                     if !success
                         begin
-                            config.{{ivar.id}} = ivar_type.from_yaml(env_value)
+                            config.{{ ivar.id }} = ivar_type.from_yaml(env_value)
                             success = true
                         rescue
                             # nop
@@ -266,14 +277,14 @@ class Config
 
             # Exit on fail
             if !success
-                puts %(Config.{{ivar.id}} failed to parse #{env_value} as {{ivar.type}})
+                puts %(Config.{{ ivar.id }} failed to parse #{env_value} as {{ ivar.type }})
                 exit(1)
             end
         end
 
         # Warn when any config attribute is set to "CHANGE_ME!!"
-        if config.{{ivar.id}} == "CHANGE_ME!!"
-          puts "Config: The value of '#{ {{ivar.stringify}} }' needs to be changed!!"
+        if config.{{ ivar.id }} == "CHANGE_ME!!"
+          puts "Config: The value of '#{ {{ ivar.stringify }} }' needs to be changed!!"
           exit(1)
         end
     {% end %}
@@ -340,6 +351,30 @@ class Config
       if !p || p < 0 || p > 0o777
         puts "Config: Socket permissions must be an octal between 0 and 777!"
         exit(1)
+      end
+    end
+
+    # Check if the domain configuration is valid
+    if (domain = config.domain)
+      if parsed_domain = begin
+           URI.parse(domain)
+         rescue
+           puts "Config (Hint): Failed to parse domain. Please check it's value!"
+           exit(1)
+         end
+        if port = parsed_domain.path.to_i?
+          puts "Config (Hint): Remove the port from your domain: ':#{port}'"
+          exit(1)
+        end
+        if (path_items = parsed_domain.path.split("/")).size > 1
+          path = path_items[1..].join("/")
+          puts "Config (Hint): Remove the path from your domain: '/#{path}'"
+          exit(1)
+        end
+        if scheme = parsed_domain.scheme.presence
+          puts "Config (Hint): Remove the scheme from your domain: '#{scheme}://'"
+          exit(1)
+        end
       end
     end
 

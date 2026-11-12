@@ -43,7 +43,7 @@ struct Invidious::User
       description = "This is the default description of an imported playlist. Feel Free to change it as you see fit."
       privacy = PlaylistPrivacy::Private
 
-      playlist = create_playlist(title, privacy, user)
+      playlist = Invidious::Playlists::Playlists.create_playlist(title, privacy, user)
       Invidious::Database::Playlists.update_description(playlist.id, description)
 
       # Add each video to the playlist from the body content
@@ -56,7 +56,7 @@ struct Invidious::User
 
           begin
             video = get_video(video_id)
-          rescue ex
+          rescue
             next
           end
 
@@ -97,7 +97,12 @@ struct Invidious::User
       end
 
       if data["watch_history"]?
-        user.watched += data["watch_history"].as_a.map(&.as_s)
+        user.watched += data["watch_history"].as_a.map do |video_id|
+          video_id = video_id.as_s
+          # Sanity check for the imported video IDs
+          raise InvalidVideoID.new(video_id) unless validate_video_id(video_id)
+          video_id
+        end
         user.watched.reverse!.uniq!.reverse!
         Invidious::Database::Users.update_watch_history(user)
       end
@@ -117,7 +122,7 @@ struct Invidious::User
           next if !description
           next if !privacy
 
-          playlist = create_playlist(title, privacy, user)
+          playlist = Invidious::Playlists::Playlists.create_playlist(title, privacy, user)
           Invidious::Database::Playlists.update_description(playlist.id, description)
 
           item["videos"]?.try &.as_a?.try &.each_with_index do |video_id, idx|
@@ -130,7 +135,7 @@ struct Invidious::User
 
             begin
               video = get_video(video_id, false)
-            rescue ex
+            rescue
               next
             end
 

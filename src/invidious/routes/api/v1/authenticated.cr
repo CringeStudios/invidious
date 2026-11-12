@@ -8,7 +8,7 @@ module Invidious::Routes::API::V1::Authenticated
   #   topics = env.params.body["topics"]?.try &.split(",").uniq.first(1000)
   #   topics ||= [] of String
 
-  #   Helpers.create_notification_stream(env, topics, connection_channel)
+  #   Invidious::Helpers.create_notification_stream(env, topics, connection_channel)
   # end
 
   def self.get_preferences(env)
@@ -42,16 +42,18 @@ module Invidious::Routes::API::V1::Authenticated
     user = env.get("user").as(User)
 
     begin
-      if body = env.request.body
-        body = env.request.body.not_nil!.gets_to_end
-      else
-        body = "{}"
-      end
+      body = if raw_body = env.request.body
+               raw_body.gets_to_end
+             else
+               "{}"
+             end
       Invidious::User::Import.from_invidious(user, body)
-    rescue
+      env.response.status_code = 204
+    rescue ex : InfoException
+      return Errors.error_json(400, ex)
+    rescue ex
+      return Errors.error_json(500, ex)
     end
-
-    env.response.status_code = 204
   end
 
   def self.get_history(env)
@@ -78,12 +80,13 @@ module Invidious::Routes::API::V1::Authenticated
     user = env.get("user").as(User)
 
     if !user.preferences.watch_history
-      return error_json(409, "Watch history is disabled in preferences.")
+      return Errors.error_json(409, "Watch history is disabled in preferences.")
     end
 
+    # Sanity checks
     id = env.params.url["id"]
-    if !id.match(/^[a-zA-Z0-9_-]{11}$/)
-      return error_json(400, "Invalid video id.")
+    unless validate_video_id(id)
+      return Errors.error_json(400, InvalidVideoID.new(id))
     end
 
     Invidious::Database::Users.mark_watched(user, id)
@@ -94,15 +97,15 @@ module Invidious::Routes::API::V1::Authenticated
     user = env.get("user").as(User)
 
     if !user.preferences.watch_history
-      return error_json(409, "Watch history is disabled in preferences.")
+      return Errors.error_json(409, "Watch history is disabled in preferences.")
     end
 
-    id = env.params.url["id"]
-    if !id.match(/^[a-zA-Z0-9_-]{11}$/)
-      return error_json(400, "Invalid video id.")
+    video_id = env.params.url["id"]
+    unless video_id && validate_video_id(video_id)
+      return Errors.error_json(400, InvalidVideoID.new(video_id))
     end
 
-    Invidious::Database::Users.mark_unwatched(user, id)
+    Invidious::Database::Users.mark_unwatched(user, video_id)
     env.response.status_code = 204
   end
 
@@ -126,7 +129,7 @@ module Invidious::Routes::API::V1::Authenticated
     page = env.params.query["page"]?.try &.to_i?
     page ||= 1
 
-    videos, notifications = get_subscription_feed(user, max_results, page)
+    videos, notifications = Invidious::User::Users.get_subscription_feed(user, max_results, page)
 
     JSON.build do |json|
       json.object do
@@ -174,7 +177,7 @@ module Invidious::Routes::API::V1::Authenticated
     ucid = env.params.url["ucid"]
 
     if !user.subscriptions.includes? ucid
-      get_channel(ucid)
+      Invidious::Channels::Channels.get_channel(ucid)
       Invidious::Database::Users.subscribe_channel(user, ucid)
     end
 
@@ -213,19 +216,19 @@ module Invidious::Routes::API::V1::Authenticated
 
     title = env.params.json["title"]?.try &.as(String).delete("<>").byte_slice(0, 150)
     if !title
-      return error_json(400, "Invalid title.")
+      return Errors.error_json(400, "Invalid title.")
     end
 
     privacy = env.params.json["privacy"]?.try { |p| PlaylistPrivacy.parse(p.as(String).downcase) }
     if !privacy
-      return error_json(400, "Invalid privacy setting.")
+      return Errors.error_json(400, "Invalid privacy setting.")
     end
 
     if Invidious::Database::Playlists.count_owned_by(user.email) >= 100
-      return error_json(400, "User cannot have more than 100 playlists.")
+      return Errors.error_json(400, "User cannot have more than 100 playlists.")
     end
 
-    playlist = create_playlist(title, privacy, user)
+    playlist = Invidious::Playlists::Playlists.create_playlist(title, privacy, user)
     env.response.headers["Location"] = "#{HOST_URL}/api/v1/auth/playlists/#{playlist.id}"
     env.response.status_code = 201
     {
@@ -240,16 +243,16 @@ module Invidious::Routes::API::V1::Authenticated
 
     plid = env.params.url["plid"]?
     if !plid || plid.empty?
-      return error_json(400, "A playlist ID is required")
+      return Errors.error_json(400, "A playlist ID is required")
     end
 
     playlist = Invidious::Database::Playlists.select(id: plid)
     if !playlist || playlist.author != user.email && playlist.privacy.private?
-      return error_json(404, "Playlist does not exist.")
+      return Errors.error_json(404, "Playlist does not exist.")
     end
 
     if playlist.author != user.email
-      return error_json(403, "Invalid user")
+      return Errors.error_json(403, "Invalid user")
     end
 
     title = env.params.json["title"].try &.as(String).delete("<>").byte_slice(0, 150) || playlist.title
@@ -277,11 +280,11 @@ module Invidious::Routes::API::V1::Authenticated
 
     playlist = Invidious::Database::Playlists.select(id: plid)
     if !playlist || playlist.author != user.email && playlist.privacy.private?
-      return error_json(404, "Playlist does not exist.")
+      return Errors.error_json(404, "Playlist does not exist.")
     end
 
     if playlist.author != user.email
-      return error_json(403, "Invalid user")
+      return Errors.error_json(403, "Invalid user")
     end
 
     Invidious::Database::Playlists.delete(plid)
@@ -297,28 +300,29 @@ module Invidious::Routes::API::V1::Authenticated
 
     playlist = Invidious::Database::Playlists.select(id: plid)
     if !playlist || playlist.author != user.email && playlist.privacy.private?
-      return error_json(404, "Playlist does not exist.")
+      return Errors.error_json(404, "Playlist does not exist.")
     end
 
     if playlist.author != user.email
-      return error_json(403, "Invalid user")
+      return Errors.error_json(403, "Invalid user")
     end
 
     if playlist.index.size >= CONFIG.playlist_length_limit
-      return error_json(400, "Playlist cannot have more than #{CONFIG.playlist_length_limit} videos")
+      return Errors.error_json(400, "Playlist cannot have more than #{CONFIG.playlist_length_limit} videos")
     end
 
     video_id = env.params.json["videoId"].try &.as(String)
-    if !video_id
-      return error_json(403, "Invalid videoId")
+    # Sanity checks
+    unless video_id && validate_video_id(video_id)
+      return Errors.error_json(400, InvalidVideoID.new(video_id))
     end
 
     begin
       video = get_video(video_id)
     rescue ex : NotFoundException
-      return error_json(404, ex)
+      return Errors.error_json(404, ex)
     rescue ex
-      return error_json(500, ex)
+      return Errors.error_json(500, ex)
     end
 
     playlist_video = PlaylistVideo.new({
@@ -353,15 +357,15 @@ module Invidious::Routes::API::V1::Authenticated
 
     playlist = Invidious::Database::Playlists.select(id: plid)
     if !playlist || playlist.author != user.email && playlist.privacy.private?
-      return error_json(404, "Playlist does not exist.")
+      return Errors.error_json(404, "Playlist does not exist.")
     end
 
     if playlist.author != user.email
-      return error_json(403, "Invalid user")
+      return Errors.error_json(403, "Invalid user")
     end
 
     if !playlist.index.includes? index
-      return error_json(404, "Playlist does not contain index")
+      return Errors.error_json(404, "Playlist does not contain index")
     end
 
     Invidious::Database::PlaylistVideos.delete(index, plid)
@@ -378,7 +382,6 @@ module Invidious::Routes::API::V1::Authenticated
   def self.get_tokens(env)
     env.response.content_type = "application/json"
     user = env.get("user").as(User)
-    scopes = env.get("scopes").as(Array(String))
 
     tokens = Invidious::Database::SessionIDs.select_all(user.email)
 
@@ -396,6 +399,8 @@ module Invidious::Routes::API::V1::Authenticated
 
   def self.register_token(env)
     user = env.get("user").as(User)
+    # Used by template bellow.
+    # ameba:disable Lint/UselessAssign
     locale = env.get("preferences").as(Preferences).locale
 
     case env.request.headers["Content-Type"]?
@@ -408,7 +413,7 @@ module Invidious::Routes::API::V1::Authenticated
       callback_url = env.params.json["callbackUrl"]?.try &.as(String)
       expire = env.params.json["expire"]?.try &.as(Int64)
     else
-      return error_json(400, "Invalid or missing header 'Content-Type'")
+      return Errors.error_json(400, "Invalid or missing header 'Content-Type'")
     end
 
     if callback_url && callback_url.empty?
@@ -422,7 +427,9 @@ module Invidious::Routes::API::V1::Authenticated
     if sid = env.get?("sid").try &.as(String)
       env.response.content_type = "text/html"
 
-      csrf_token = generate_response(sid, {":authorize_token"}, HMAC_KEY, use_nonce: true)
+      # Used by template bellow.
+      # ameba:disable Lint/UselessAssign
+      csrf_token = Invidious::Helpers::Tokens.generate_response(sid, {":authorize_token"}, HMAC_KEY, use_nonce: true)
       return templated "user/authorize_token"
     else
       env.response.content_type = "application/json"
@@ -431,12 +438,12 @@ module Invidious::Routes::API::V1::Authenticated
 
       authorized_scopes = [] of String
       scopes.each do |scope|
-        if scopes_include_scope(superset_scopes, scope)
+        if Invidious::Helpers::Tokens.scopes_include_scope(superset_scopes, scope)
           authorized_scopes << scope
         end
       end
 
-      access_token = generate_token(user.email, authorized_scopes, expire, HMAC_KEY)
+      access_token = Invidious::Helpers::Tokens.generate_token(user.email, authorized_scopes, expire, HMAC_KEY)
 
       if callback_url
         access_token = URI.encode_www_form(access_token)
@@ -460,7 +467,6 @@ module Invidious::Routes::API::V1::Authenticated
   def self.unregister_token(env)
     env.response.content_type = "application/json"
 
-    user = env.get("user").as(User)
     scopes = env.get("scopes").as(Array(String))
 
     session = env.params.json["session"]?.try &.as(String)
@@ -469,10 +475,10 @@ module Invidious::Routes::API::V1::Authenticated
     # Allow tokens to revoke other tokens with correct scope
     if session == env.get("session").as(String)
       Invidious::Database::SessionIDs.delete(sid: session)
-    elsif scopes_include_scope(scopes, "GET:tokens")
+    elsif Invidious::Helpers::Tokens.scopes_include_scope(scopes, "GET:tokens")
       Invidious::Database::SessionIDs.delete(sid: session)
     else
-      return error_json(400, "Cannot revoke session #{session}")
+      return Errors.error_json(400, "Cannot revoke session #{session}")
     end
 
     env.response.status_code = 204
@@ -482,9 +488,9 @@ module Invidious::Routes::API::V1::Authenticated
     env.response.content_type = "text/event-stream"
 
     raw_topics = env.params.body["topics"]? || env.params.query["topics"]?
-    topics = raw_topics.try &.split(",").uniq.first(1000)
+    topics = raw_topics.try &.split(",").uniq!.first(1000)
     topics ||= [] of String
 
-    Helpers.create_notification_stream(env, topics, CONNECTION_CHANNEL)
+    Invidious::Helpers.create_notification_stream(env, topics, CONNECTION_CHANNEL)
   end
 end

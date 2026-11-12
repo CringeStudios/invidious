@@ -16,9 +16,9 @@ module Invidious::Routes::API::V1::Videos
     begin
       video = get_video(id, region: region)
     rescue ex : NotFoundException
-      return error_json(404, ex)
+      return Errors.error_json(404, ex)
     rescue ex
-      return error_json(500, ex)
+      return Errors.error_json(500, ex)
     end
 
     return JSON.build do |json|
@@ -32,8 +32,9 @@ module Invidious::Routes::API::V1::Videos
     id = env.params.url["id"]
     region = env.params.query["region"]? || env.params.body["region"]?
 
-    if id.nil? || id.size != 11 || !id.matches?(/^[\w-]+$/)
-      return error_json(400, "Invalid video ID")
+    # Sanity checks
+    unless validate_video_id(id)
+      return Errors.error_json(400, InvalidVideoID.new(id))
     end
 
     # See https://github.com/ytdl-org/youtube-dl/blob/6ab30ff50bf6bd0585927cb73c7421bef184f87a/youtube_dl/extractor/youtube.py#L1354
@@ -46,9 +47,9 @@ module Invidious::Routes::API::V1::Videos
 
     begin
       video = get_video(id, region: region)
-    rescue ex : NotFoundException
+    rescue NotFoundException
       haltf env, 404
-    rescue ex
+    rescue
       haltf env, 500
     end
 
@@ -186,9 +187,9 @@ module Invidious::Routes::API::V1::Videos
 
     begin
       video = get_video(id, region: region)
-    rescue ex : NotFoundException
+    rescue NotFoundException
       haltf env, 404
-    rescue ex
+    rescue
       haltf env, 500
     end
 
@@ -256,33 +257,31 @@ module Invidious::Routes::API::V1::Videos
   def self.annotations(env)
     env.response.content_type = "text/xml"
 
-    id = env.params.url["id"]
+    video_id = env.params.url["id"]
     source = env.params.query["source"]?
     source ||= "archive"
 
-    if !id.match(/[a-zA-Z0-9_-]{11}/)
+    unless video_id && validate_video_id(video_id)
       haltf env, 400
     end
 
-    annotations = ""
-
     case source
     when "archive"
-      if CONFIG.cache_annotations && (cached_annotation = Invidious::Database::Annotations.select(id))
+      if CONFIG.cache_annotations && (cached_annotation = Invidious::Database::Annotations.select(video_id))
         annotations = cached_annotation.annotations
       else
-        index = CHARS_SAFE.index!(id[0]).to_s.rjust(2, '0')
+        index = CHARS_SAFE.index!(video_id[0]).to_s.rjust(2, '0')
 
         # IA doesn't handle leading hyphens,
         # so we use https://archive.org/details/youtubeannotations_64
         if index == "62"
           index = "64"
-          id = id.sub(/^-/, 'A')
+          video_id = video_id.sub(/^-/, 'A')
         end
 
-        file = URI.encode_www_form("#{id[0, 3]}/#{id}.xml")
+        file = URI.encode_www_form("#{video_id[0, 3]}/#{video_id}.xml")
 
-        location = make_client(INTERNET_ARCHIVE_URL, &.get("/download/youtubeannotations_#{index}/#{id[0, 2]}.tar/#{file}"))
+        location = make_client(INTERNET_ARCHIVE_URL, &.get("/download/youtubeannotations_#{index}/#{video_id[0, 2]}.tar/#{file}"))
 
         if !location.headers["Location"]?
           env.response.status_code = location.status_code
@@ -300,10 +299,10 @@ module Invidious::Routes::API::V1::Videos
 
         annotations = response.body
 
-        Helpers.cache_annotation(id, annotations)
+        Invidious::Helpers.cache_annotation(video_id, annotations)
       end
     else # "youtube"
-      response = YT_POOL.client &.get("/annotations_invideo?video_id=#{id}")
+      response = YT_POOL.client &.get("/annotations_invideo?video_id=#{video_id}")
 
       if response.status_code != 200
         haltf env, response.status_code
@@ -339,10 +338,24 @@ module Invidious::Routes::API::V1::Videos
     format ||= "json"
 
     action = env.params.query["action"]?
+    # 2026-09-14 TODO: Check if action is or can be used somewhere
+    # as is unused currently, but for some reason is it here.
+    # ameba:disable Lint/UselessAssign
     action ||= "action_get_comments"
 
     continuation = env.params.query["continuation"]?
     sort_by = env.params.query["sort_by"]?.try &.downcase
+
+    # 2026-10-18 TODO: Make a mechanism to remove unused
+    # preferences from PREFS cookie of the clients
+    # when some preferences are changed, like this one
+    # which is a Reedit comments deprecation that appears
+    # on preferences.
+    #
+    # Fallback for API users that still use Reddit as a source
+    if source == "reddit"
+      return Errors.error_json(410, RedditIsDeprecated.new)
+    end
 
     if source == "youtube"
       sort_by ||= "top"
@@ -350,43 +363,12 @@ module Invidious::Routes::API::V1::Videos
       begin
         comments = Comments.fetch_youtube(id, continuation, format, locale, thin_mode, region, sort_by: sort_by)
       rescue ex : NotFoundException
-        return error_json(404, ex)
+        return Errors.error_json(404, ex)
       rescue ex
-        return error_json(500, ex)
+        return Errors.error_json(500, ex)
       end
 
       return comments
-    elsif source == "reddit"
-      sort_by ||= "confidence"
-
-      begin
-        comments, reddit_thread = Comments.fetch_reddit(id, sort_by: sort_by)
-      rescue ex
-        comments = nil
-        reddit_thread = nil
-      end
-
-      if !reddit_thread || !comments
-        return error_json(404, "No reddit threads found")
-      end
-
-      if format == "json"
-        reddit_thread = JSON.parse(reddit_thread.to_json).as_h
-        reddit_thread["comments"] = JSON.parse(comments.to_json)
-
-        return reddit_thread.to_json
-      else
-        content_html = Frontend::Comments.template_reddit(comments, locale)
-        content_html = Comments.fill_links(content_html, "https", "www.reddit.com")
-        content_html = Comments.replace_links(content_html)
-        response = {
-          "title"       => reddit_thread.title,
-          "permalink"   => reddit_thread.permalink,
-          "contentHtml" => content_html,
-        }
-
-        return response.to_json
-      end
     end
   end
 
@@ -400,10 +382,10 @@ module Invidious::Routes::API::V1::Videos
     proxy = {"1", "true"}.any? &.== env.params.query["local"]?
 
     response = YoutubeAPI.resolve_url("https://www.youtube.com/clip/#{clip_id}")
-    return error_json(400, "Invalid clip ID") if response["error"]?
+    return Errors.error_json(400, "Invalid clip ID") if response["error"]?
 
     video_id = response.dig?("endpoint", "watchEndpoint", "videoId").try &.as_s
-    return error_json(400, "Invalid clip ID") if video_id.nil?
+    return Errors.error_json(400, "Invalid clip ID") if video_id.nil?
 
     start_time = nil
     end_time = nil
@@ -416,9 +398,9 @@ module Invidious::Routes::API::V1::Videos
     begin
       video = get_video(video_id, region: region)
     rescue ex : NotFoundException
-      return error_json(404, ex)
+      return Errors.error_json(404, ex)
     rescue ex
-      return error_json(500, ex)
+      return Errors.error_json(500, ex)
     end
 
     return JSON.build do |json|
@@ -450,9 +432,9 @@ module Invidious::Routes::API::V1::Videos
       begin
         video = get_video(id)
       rescue ex : NotFoundException
-        return error_json(404, ex)
+        return Errors.error_json(404, ex)
       rescue ex
-        return error_json(500, ex)
+        return Errors.error_json(500, ex)
       end
 
       response = JSON.build do |json|
@@ -490,14 +472,14 @@ module Invidious::Routes::API::V1::Videos
       begin
         video = get_video(id)
       rescue ex : NotFoundException
-        return error_json(404, ex)
+        return Errors.error_json(404, ex)
       rescue ex
-        return error_json(500, ex)
+        return Errors.error_json(500, ex)
       end
 
       target_transcript = video.captions.select(&.name.== label)
       if target_transcript.empty?
-        return error_json(404, NotFoundException.new("Requested transcript does not exist"))
+        return Errors.error_json(404, NotFoundException.new("Requested transcript does not exist"))
       else
         target_transcript = target_transcript[0]
         lang, auto_generated = target_transcript.language_code, target_transcript.auto_generated
@@ -511,9 +493,9 @@ module Invidious::Routes::API::V1::Videos
         YoutubeAPI.get_transcript(params), lang, auto_generated
       )
     rescue ex : NotFoundException
-      return error_json(404, ex)
+      return Errors.error_json(404, ex)
     rescue ex
-      return error_json(500, ex)
+      return Errors.error_json(500, ex)
     end
 
     return transcript.to_json

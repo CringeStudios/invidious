@@ -27,7 +27,7 @@ def fetch_mix(rdid, video_id, cookies = nil, locale = nil)
 
   video_id = "CvFH_6DNRCY" if rdid.starts_with? "OLAK5uy_"
   response = YT_POOL.client &.get("/watch?v=#{video_id}&list=#{rdid}&gl=US&hl=en", headers)
-  initial_data = Helpers.extract_initial_data(response.body)
+  initial_data = Invidious::Helpers.extract_initial_data(response.body)
 
   if !initial_data["contents"]["twoColumnWatchNextResults"]["playlist"]?
     raise InfoException.new("Could not create mix.")
@@ -83,14 +83,14 @@ end
 
 def template_mix(mix, listen)
   html = <<-END_HTML
-  <h3>
-    <a href="/mix?list=#{mix["mixId"]}">
-      #{mix["title"]}
-    </a>
-  </h3>
-  <div class="pure-menu pure-menu-scrollable playlist-restricted">
-    <ol class="pure-menu-list">
-  END_HTML
+    <h3>
+      <a href="/mix?list=#{mix["mixId"]}">
+        #{mix["title"]}
+      </a>
+    </h3>
+    <div class="pure-menu pure-menu-scrollable playlist-restricted">
+      <ol class="pure-menu-list">
+    END_HTML
 
   mix["videos"].as_a.each do |video|
     html += <<-END_HTML
@@ -106,14 +106,14 @@ def template_mix(mix, listen)
           </p>
         </a>
       </li>
-    END_HTML
+      END_HTML
   end
 
   html += <<-END_HTML
-    </ol>
-  </div>
-  <hr>
-  END_HTML
+      </ol>
+    </div>
+    <hr>
+    END_HTML
 
   html
 end

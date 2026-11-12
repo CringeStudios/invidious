@@ -15,6 +15,7 @@ private ITEM_PARSERS = {
   Parsers::VideoRendererParser,
   Parsers::ChannelRendererParser,
   Parsers::GridPlaylistRendererParser,
+  Parsers::GridShowRenderer,
   Parsers::PlaylistRendererParser,
   Parsers::CategoryRendererParser,
   Parsers::ReelItemRendererParser,
@@ -40,8 +41,8 @@ private module Parsers
       begin
         return parse_internal(*args)
       rescue ex
-        LOGGER.debug("#{{{@type.name}}}: Failed to render item.")
-        LOGGER.debug("#{{{@type.name}}}: Got exception: #{ex.message}")
+        LOGGER.debug("#{{{ @type.name }}}: Failed to render item.")
+        LOGGER.debug("#{{{ @type.name }}}: Got exception: #{ex.message}")
         ProblematicTimelineItem.new(
           parse_exception: ex
         )
@@ -152,7 +153,6 @@ private module Parsers
         when "Premium"
           # TODO: Potentially available as item_contents["topStandaloneBadge"]["metadataBadgeRenderer"]
           badges |= VideoBadges::Premium
-        else nil # Ignore
         end
       end
 
@@ -173,7 +173,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -240,7 +240,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -289,7 +289,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -334,7 +334,51 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
+    end
+  end
+
+  # Parses a InnerTube gridShowRenderer into a SearchPlaylist. Returns nil when the given object isn't a gridShowRenderer
+  #
+  # A gridShowRenderer renders a playlist, that is located in a grid, to click on within the YouTube and Invidious UI.
+  # It is **not** the playlist itself.
+  #
+  # See specs for example.
+  #
+  # `gridShowRenderer`s can be found on the "shows" tab of channels.
+  #
+  module GridShowRenderer
+    extend self
+    include BaseParser
+
+    def process(item : JSON::Any, author_fallback : AuthorFallback)
+      if item_contents = item["gridShowRenderer"]?
+        return self.parse(item_contents, author_fallback)
+      end
+    end
+
+    private def parse_internal(item_contents, author_fallback)
+      title = extract_text(item_contents["title"]) || ""
+      plid = item_contents.dig?("navigationEndpoint", "commandMetadata", "webCommandMetadata", "url").try &.as_s.gsub("/show/VL", "").split("?sbp")[0] || ""
+      author_verified = has_verified_badge?(item_contents["ownerBadges"]?)
+
+      video_count = item_contents.dig?("thumbnailOverlays", 0, "thumbnailOverlayBottomPanelRenderer", "text", "runs", 0, "text").try(&.as_s.to_i) || 0
+      playlist_thumbnail = HelperExtractors.get_thumbnails(item_contents.dig("thumbnailRenderer", "showCustomThumbnailRenderer"))
+
+      SearchPlaylist.new({
+        title:           title,
+        id:              plid,
+        author:          author_fallback.name,
+        ucid:            author_fallback.id,
+        video_count:     video_count,
+        videos:          [] of SearchPlaylistVideo,
+        thumbnail:       playlist_thumbnail,
+        author_verified: author_verified,
+      })
+    end
+
+    def self.parser_name
+      return {{ @type.name }}
     end
   end
 
@@ -395,7 +439,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -467,7 +511,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -496,7 +540,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -522,12 +566,13 @@ private module Parsers
       child ||= ReelItemRendererParser.process(item_contents, author_fallback)
       child ||= PlaylistRendererParser.process(item_contents, author_fallback)
       child ||= LockupViewModelParser.process(item_contents, author_fallback)
+      child ||= GridShowRenderer.process(item_contents, author_fallback)
       child ||= ShortsLockupViewModelParser.process(item_contents, author_fallback)
       return child
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -626,7 +671,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -655,19 +700,42 @@ private module Parsers
         thumbnail_view_model = item_contents.dig(
           "contentImage", "thumbnailViewModel"
         )
+        # TODO: This is an useless assignment, is not used anywhere
+        # so check if it can be used somewhere later.
+        #
+        # ameba:disable Lint/UselessAssign
         thumbnail = thumbnail_view_model.dig("image", "sources", 0, "url").as_s
 
         video_id = item_contents["contentId"].as_s
 
         metadata = item_contents.dig("metadata", "lockupMetadataViewModel")
         title = metadata.dig("title", "content").as_s
+        published = nil
+        view_count_text = nil
         # Contains the views of the video and the published time of the video.
-        metadata_parts = metadata.dig("metadata", "contentMetadataViewModel", "metadataRows", 0, "metadataParts").try &.as_a
+        if (metadata_rows = metadata.dig("metadata", "contentMetadataViewModel", "metadataRows").try &.as_a)
+          metadata_rows.each do |row|
+            # To filter members only videos, they do not have metadataParts available.
+            # This videos are not hidden from the channel videos list.
+            badges = row.dig?("badges").try &.as_a
+            if badges.try &.any? { |item| item.dig?("badgeViewModel", "badgeStyle").try &.as_s == "BADGE_MEMBERS_ONLY" }
+              next
+            end
 
-        view_count_text = metadata_parts.try &.find { |item| item["icon"]?.nil? && item.dig?("text", "content").try &.as_s.includes?("views") }
-          .try &.dig("text", "content").as_s
-        published = metadata_parts.try &.find { |item| item["icon"]?.nil? && item.dig?("text", "content").try &.as_s.includes?("ago") }
-          .try { |item| decode_date(item.dig("text", "content").as_s) } || Time.local
+            metadata_parts = row.dig("metadataParts").try &.as_a
+
+            if view_count_text.nil?
+              view_count_text = metadata_parts.try &.find { |item| item["icon"]?.nil? && item.dig?("text", "content").try &.as_s.includes?("views") }
+                .try &.dig("text", "content").as_s
+            end
+            if published.nil?
+              published = metadata_parts.try &.find { |item| item["icon"]?.nil? && item.dig?("text", "content").try &.as_s.includes?("ago") }
+                .try { |item| decode_date(item.dig("text", "content").as_s) }
+            end
+
+            break if !view_count_text.nil? && !published.nil?
+          end
+        end
 
         view_count = short_text_to_number(view_count_text || "0")
 
@@ -680,7 +748,7 @@ private module Parsers
           id:                 video_id,
           author:             author_fallback.name,
           ucid:               author_fallback.id,
-          published:          published,
+          published:          published || Time.local,
           views:              view_count,
           description_html:   "",
           length_seconds:     length_seconds || 0,
@@ -739,9 +807,15 @@ private module Parsers
         video_count = thumbnail_view_model.dig("overlays").as_a
           .compact_map(&.dig?("thumbnailOverlayBadgeViewModel", "thumbnailBadges").try &.as_a)
           .flatten
-          .find(nil, &.dig?("thumbnailBadgeViewModel", "text").try { |node|
-            {"episodes", "videos", "lessons"}.any? { |str| node.as_s.ends_with?(str) }
-          })
+          .find(nil, &.dig?("thumbnailBadgeViewModel", "text").try do |node|
+            # Playlists that contain MORE THAN ONE video, use "videos" for their video count.
+            # "text" => "8 videos"
+            #
+            # Playlists that contain ONLY ONE video, use "video" for their video count.
+            # "text" => "1 video"
+            #
+            {"episodes", "videos", "video", "lessons"}.any? { |str| node.as_s.ends_with?(str) }
+          end)
           .try &.dig("thumbnailBadgeViewModel", "text").as_s.to_i(strict: false)
 
         metadata = item_contents.dig("metadata", "lockupMetadataViewModel")
@@ -790,10 +864,10 @@ private module Parsers
         # ]
         #
         metadata_rows = metadata.dig?("metadata", "contentMetadataViewModel", "metadataRows").try &.as_a
-        metadata_parts = metadata_rows.try &.find { |row|
+        metadata_parts = metadata_rows.try &.find do |row|
           parts = row["metadataParts"]?.try &.as_a
           parts && !parts.any? { |item| item.dig?("text", "content").try &.as_s == "View full playlist" }
-        }.try &.["metadataParts"].as_a
+        end.try &.["metadataParts"].as_a
 
         if author_info = metadata_parts.try &.find(&.dig?("text", "commandRuns"))
              .try &.["text"]
@@ -831,7 +905,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -889,7 +963,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -918,7 +992,7 @@ private module Parsers
     end
 
     def self.parser_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 end
@@ -1005,7 +1079,7 @@ private module Extractors
     end
 
     def self.extractor_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -1046,7 +1120,7 @@ private module Extractors
     end
 
     def self.extractor_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 
@@ -1080,7 +1154,7 @@ private module Extractors
     end
 
     def self.extractor_name
-      return {{@type.name}}
+      return {{ @type.name }}
     end
   end
 end

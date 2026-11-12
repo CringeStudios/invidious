@@ -5,9 +5,9 @@ module Invidious::Routes::Embed
     locale = env.get("preferences").as(Preferences).locale
     if plid = env.params.query["list"]?.try &.gsub(/[^a-zA-Z0-9_-]/, "")
       begin
-        playlist = get_playlist(plid)
+        playlist = Invidious::Playlists::Playlists.get_playlist(plid)
         offset = env.params.query["index"]?.try &.to_i? || 0
-        videos = get_playlist_videos(playlist, offset: offset)
+        videos = Invidious::Playlists::Playlists.get_playlist_videos(playlist, offset: offset)
         if videos.empty?
           url = "/playlist?list=#{plid}"
           raise NotFoundException.new(I18n.translate(locale, "error_video_not_in_playlist", url))
@@ -15,9 +15,9 @@ module Invidious::Routes::Embed
 
         first_playlist_video = videos[0].as(PlaylistVideo)
       rescue ex : NotFoundException
-        return error_template(404, ex)
+        return Errors.error_template(404, ex)
       rescue ex
-        return error_template(500, ex)
+        return Errors.error_template(500, ex)
       end
 
       url = "/embed/#{first_playlist_video.id}?#{env.params.query}"
@@ -66,9 +66,9 @@ module Invidious::Routes::Embed
 
       if plid
         begin
-          playlist = get_playlist(plid)
+          playlist = Invidious::Playlists::Playlists.get_playlist(plid)
           offset = env.params.query["index"]?.try &.to_i? || 0
-          videos = get_playlist_videos(playlist, offset: offset)
+          videos = Invidious::Playlists::Playlists.get_playlist_videos(playlist, offset: offset)
           if videos.empty?
             url = "/playlist?list=#{plid}"
             raise NotFoundException.new(I18n.translate(locale, "error_video_not_in_playlist", url))
@@ -76,9 +76,9 @@ module Invidious::Routes::Embed
 
           first_playlist_video = videos[0].as(PlaylistVideo)
         rescue ex : NotFoundException
-          return error_template(404, ex)
+          return Errors.error_template(404, ex)
         rescue ex
-          return error_template(500, ex)
+          return Errors.error_template(500, ex)
         end
 
         url = "/embed/#{first_playlist_video.id}"
@@ -101,7 +101,7 @@ module Invidious::Routes::Embed
       env.params.query.delete_all("channel")
 
       if !video_id || video_id == "live_stream"
-        return error_template(500, "Video is unavailable.")
+        return Errors.error_template(500, "Video is unavailable.")
       end
 
       url = "/embed/#{video_id}"
@@ -119,7 +119,6 @@ module Invidious::Routes::Embed
       end
 
       return env.redirect url
-    else nil # Continue
     end
 
     params = Invidious::Videos.process_video_params(env.params.query, preferences)
@@ -135,9 +134,9 @@ module Invidious::Routes::Embed
     begin
       video = get_video(id, region: params.region)
     rescue ex : NotFoundException
-      return error_template(404, ex)
+      return Errors.error_template(404, ex)
     rescue ex
-      return error_template(500, ex)
+      return Errors.error_template(500, ex)
     end
 
     if preferences.annotations_subscribed &&
@@ -182,14 +181,14 @@ module Invidious::Routes::Embed
 
     captions = video.captions
 
-    preferred_captions = captions.select { |caption|
+    preferred_captions = captions.select do |caption|
       params.preferred_captions.includes?(caption.name) ||
         params.preferred_captions.includes?(caption.language_code.split("-")[0])
-    }
-    preferred_captions.sort_by! { |caption|
+    end
+    preferred_captions.sort_by! do |caption|
       (params.preferred_captions.index(caption.name) ||
         params.preferred_captions.index(caption.language_code.split("-")[0])).not_nil!
-    }
+    end
     captions = captions - preferred_captions
 
     aspect_ratio = nil
